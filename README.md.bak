@@ -1,16 +1,16 @@
 <img width="150" height="150" align="left" style="float: left; margin: 0 10px 0 0;" alt="MS-DOS logo" src="https://github.com/Microsoft/MS-DOS/blob/master/msdos-logo.png">   
 
-# MS-DOS v1.25 and v2.0 Source Code
-This repo contains the original source-code and compiled binaries for MS-DOS v1.25 and MS-DOS v2.0.
+# MS-DOS v1.25 e v2.0 - Código fonte
+Este repositório contém o código-fonte original e binários compilados para MS-DOS v1.25 e MS-DOS v2.0.
 
-These are the same files [originally shared at the Computer History Museum on March 25th, 2014]( http://www.computerhistory.org/atchm/microsoft-ms-dos-early-source-code/) and are being (re)published in this repo to make them easier to find, reference-to in external writing and works, and to allow exploration and experimentation for those interested in early PC Operating Systems.  
+Estes são os mesmos arquivos [originalmente compartilhados no Computer History Museum em 25 de março de 2014]( http://www.computerhistory.org/atchm/microsoft-ms-dos-early-source-code/) e estão sendo (re ) publicado neste repositório para torná-los mais fáceis de encontrar, referência em escritos e trabalhos externos, e para permitir a exploração e experimentação para os interessados nos primeiros sistemas operacionais de PC.
 
-# License
-All files within this repo are released under the [MIT (OSI) License]( https://en.wikipedia.org/wiki/MIT_License) as per the [LICENSE file](https://github.com/Microsoft/MS-DOS/blob/master/LICENSE.md) stored in the root of this repo.
+# Licença
+Todos os arquivos neste repositório são lançados sob a [Licença MIT (OSI)]( https://en.wikipedia.org/wiki/MIT_License) conforme o [arquivo LICENSE](https://github.com/Microsoft/MS -DOS/blob/master/LICENSE.md) armazenado na raiz deste repositório.
 
-# Contribute!
-The source files in this repo are for historical reference and will be kept static, so please **don’t send** Pull Requests suggesting any modifications to the source files, but feel free to fork this repo and experiment 😊.  
+# Contribua!
+Os arquivos de origem neste repositório são para referência histórica e serão mantidos estáticos, portanto, **não envie** solicitações de pull sugerindo quaisquer modificações nos arquivos de origem, mas sinta-se à vontade para bifurcar este repositório e experimentar 😊.
 
-If, however, you’d like to submit additional non-source content or modifications to non-source files (e.g., this README), please submit via PR, and we’ll review and consider.
+Se, no entanto, você quiser enviar conteúdo adicional não-fonte ou modificações em arquivos não-fonte (por exemplo, este README), envie via PR e analisaremos e consideraremos.
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).  For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
+Este projeto adotou o [Código de Conduta de Código Aberto da Microsoft](https://opensource.microsoft.com/codeofconduct/). Para obter mais informações, consulte as [Perguntas frequentes sobre o código de conduta](https://opensource.microsoft.com/codeofconduct/faq/) ou entre em contato com [opencode@microsoft.com](mailto:opencode@microsoft.com) com quaisquer perguntas adicionais ou comentários.
