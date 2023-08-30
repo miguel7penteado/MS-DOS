@@ -1,0 +1,1906 @@
+; IO.SYS for IBM PC compatible
+; Copyright 2022 Hideki EIRAKU <hdk_2@users.sourceforge.net>
+; Based on
+;# MS-DOS v1.25 and v2.0 Source Code
+;
+;Copyright (c) Microsoft Corporation.
+;All rights reserved.
+;
+;## MIT License.
+;
+;Permission is hereby granted, free of charge, to any person obtaining
+;a copy of this software and associated documentation files (the
+;Software), to deal in the Software without restriction, including
+;without limitation the rights to use, copy, modify, merge, publish,
+;distribute, sublicense, and/or sell copies of the Software, and to
+;permit persons to whom the Software is furnished to do so, subject to
+;the following conditions:
+;
+;The above copyright notice and this permission notice shall be
+;included in all copies or substantial portions of the Software.
+;
+;THE SOFTWARE IS PROVIDED *AS IS*, WITHOUT WARRANTY OF ANY KIND,
+;EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+;MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+;NON-INFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+;BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+;ACTION OF CONTRACT,TORT OR OTHERWISE, ARISING FROM OUT OF OR IN
+;CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+;SOFTWARE.
+
+       TITLE   IO.SYS
+
+; I/O system for Version 2.x of MSDOS.
+
+;This BIOS designed to be linked with the SYSINIT module provided by
+;Microsoft
+
+ANSI    EQU     0               ;Ansi switch.
+
+;Things needed to communicate with SYSINIT
+
+EXTRN   SYSINIT:FAR                   ;The entry point of SYSINIT
+EXTRN   CURRENT_DOS_LOCATION:WORD     ;Where the DOS is when SYSINIT called
+EXTRN   FINAL_DOS_LOCATION:WORD       ;Where I want SYSINIT to put the DOS
+EXTRN   DEVICE_LIST:DWORD             ;Pointer to the DEVICE list.
+EXTRN   MEMORY_SIZE:WORD              ;Size in paragraphs of Physical memory.
+EXTRN   DEFAULT_DRIVE:BYTE            ;Default Drive to use when system booted
+EXTRN   BUFFERS:BYTE                  ;Number of default buffers.
+                                      ; Leave as is and SYSINIT uses only 2.
+
+RELOC	SEGMENT
+RELOC	ENDS
+
+CODE    SEGMENT
+CODE    ENDS
+
+SYSINITSEG      SEGMENT PUBLIC 'SYSTEM_INIT'
+SYSINITSEG      ENDS
+
+STACK	SEGMENT STACK 'STACK'
+STACKSIZE EQU 128
+	DB	STACKSIZE DUP (?)
+STACK	ENDS
+
+LAST	SEGMENT PUBLIC 'LAST'
+LAST	ENDS
+
+SEG_PC	EQU	80H		; CODE segment address on PC
+SEG_JA	EQU	200H		; CODE segment address on JX Japanese mode
+
+RELOC	SEGMENT
+	ORG	0
+	;; The PC_BOOT.BIN jumps to here.
+	;; MZ header is at DS:0.
+	;; Relocate to the address that IO.SYS will stay at.
+	;; The address might be different from loaded address.
+	ASSUME	CS:RELOC
+RELOCPR	PROC	FAR
+	MOV	AX,SEG_PC
+	TEST	DL,40H
+	JE	NOTJ
+	MOV	AX,SEG_JA
+NOTJ:
+	SUB	AX,CODE		; This CODE value is not relocated yet!
+	XOR	BX,BX
+	CMP	WORD PTR DS:[BX],'M' OR ('Z' SHL 8)
+	JNE	$		; Sanity check
+	MOV	CX,DS:[BX+6]	; Number of relocation
+	JCXZ	$		; Sanity check
+	MOV	SI,DS:[BX+18H]	; Relocation table offset
+	MOV	BX,CS		; Loaded segment (DS+header size)
+RELOC_LOOP:
+	ADD	DS:[SI+2],BX
+	LES	DI,DWORD PTR DS:[SI]
+	ADD	ES:[DI],AX
+	ADD	SI,4
+	LOOP	RELOC_LOOP
+	;; Relocation has been completed.
+	;; Jump to the initialization code.
+	MOV	AX,CS
+	SUB	AX,RELOC
+	ADD	AX,CODE
+	PUSH	AX
+	MOV	AX,OFFSET CODE:HWINIT2
+	PUSH	AX
+	RET
+RELOCPR	ENDP
+RELOC	ENDS
+
+CODE    SEGMENT
+ASSUME  CS:CODE,DS:NOTHING,ES:NOTHING,SS:NOTHING
+BIOSSEG	EQU	CODE
+
+        ORG     0               ;Starts at an offset of zero.
+
+        PAGE
+
+        SUBTTL  Device driver tables.
+
+;-----------------------------------------------+
+;     DWORD pointer to next device              | 1 word offset.
+;         (-1,-1 if last device)                | 1 word segement.
+;-----------------------------------------------+
+;     Device attribute WORD                     ; 1 word.
+;       Bit 15 = 1 for chacter devices.         ;
+;                0 for Block devices.           ;
+;                                               ;
+;       Charcter devices. (Bit 15=1)            ;
+;         Bit 0 = 1  current sti device.        ;
+;         Bit 1 = 1  current sto device.        ;
+;         Bit 2 = 1  current NUL device.        ;
+;         Bit 3 = 1  current Clock device.      ;
+;                                               ;
+;         Bit 13 = 1 for non IBM machines.      ;
+;                  0 for IBM machines only.     ;
+;         Bit 14 = 1 IOCTL control bit.         ;
+;-----------------------------------------------+
+;     Device strategy pointer.                  ; 1 word offset.
+;-----------------------------------------------+
+;     Device interrupt pointer.                 ; 1 word offset.
+;-----------------------------------------------+
+;     Device name field.                        ; 8 bytes.
+;       Character devices are any valid name    ;
+;         left justified, in a space filled     ;
+;         field.                                ;
+;       Block devices contain # of units in     ;
+;         the first byte.                       ;
+;-----------------------------------------------+
+
+        PAGE
+        SUBTTL  Dispatch tables for each device.
+
+DSKTBL: DW      DSK_INIT        ;0  - Initialize Driver.
+        DW      MEDIAC          ;1  - Return current media code.
+        DW      GET_BPB         ;2  - Get Bios Parameter Block.
+        DW      CMDERR          ;3  - Reserved. (currently returns error)
+        DW      DSK_RED         ;4  - Block read.
+        DW      BUS_EXIT        ;5  - (Not used, return busy flag)
+        DW      EXIT            ;6  - Return status. (Not used)
+        DW      EXIT            ;7  - Flush input buffer. (Not used.)
+        DW      DSK_WRT         ;8  - Block write.
+        DW      DSK_WRV         ;9  - Block write with verify.
+        DW      EXIT            ;10 - Return output status.
+        DW      EXIT            ;11 - Flush output buffer. (Not used.)
+        DW      EXIT            ;12 - IO Control.
+
+CONTBL: DW      FEXIT            ;0  - Init. (Not used)
+        DW      FEXIT            ;1  - Media check (Not used)
+        DW      FEXIT            ;2  - Get Bios Parameter Block (Not used)
+        DW      FCMDERR          ;3  - Reserved. (Currently returns error)
+        DW      FCON_READ        ;4  - Character read. (Destructive)
+        DW      FCON_RDND        ;5  - Character read. (Non-destructive)
+        DW      FEXIT            ;6  - Return status. (Not used)
+        DW      FCON_FLSH        ;7  - Flush Input buffer.
+        DW      FCON_WRIT        ;8  - Character write.
+        DW      FCON_WRIT        ;9  - Character write with Verify.
+        DW      FCON_WRST        ;10 - Character write status.
+        DW      FEXIT            ;11 - Flush output buffer. (Not used.)
+        DW      FEXIT            ;12 - IO Control.
+
+AUXTBL: DW      FEXIT            ;0  - Init. (Not used)
+        DW      FEXIT            ;1  - Media check (Not used)
+        DW      FEXIT            ;2  - Get Bios Parameter Block (Not used)
+        DW      FCMDERR          ;3  - Reserved. (Returns an error)
+        DW      FAUX_READ        ;4  - Character read. (Destructive)
+        DW      FAUX_RDND        ;5  - Character read. (Non-destructive)
+        DW      FEXIT            ;6  - Return status. (Not used)
+        DW      FAUX_CLR         ;7  - Flush Input buffer.
+        DW      FAUX_WRIT        ;8  - Character write.
+        DW      FAUX_WRIT        ;9  - Character write with verify.
+        DW      FAUX_WRST        ;10 - Character write status.
+        DW      FEXIT            ;11 - Flush output buffer. (Not used.)
+        DW      FEXIT            ;12 - IO Control.
+
+TIMTBL: DW      EXIT            ;0  - Init. (Not used)
+        DW      EXIT            ;1  - Media check (Not used)
+        DW      EXIT            ;2  - Get Bios Parameter Block (Not used)
+        DW      CMDERR          ;3  - Reserved. (Currently returns an error)
+        DW      TIM_RED         ;4  - Character read. (Destructive)
+        DW      BUS_EXIT        ;5  - (Not used, returns busy flag.)
+        DW      EXIT            ;6  - Return status. (Not used)
+        DW      EXIT            ;7  - Flush Input buffer. (Not used)
+        DW      TIM_WRT         ;8  - Character write.
+        DW      TIM_WRT         ;9  - Character write with verify.
+        DW      EXIT            ;10 - Character write status. (Not used)
+        DW      EXIT            ;11 - Flush output buffer. (Not used)
+        DW      EXIT            ;12 - IO Control.
+
+PRNTBL: DW      FEXIT            ;0  - (Not used)
+        DW      FEXIT            ;1  - (Not used)
+        DW      FEXIT            ;2  - Block (Not used)
+        DW      FCMDERR          ;3  - Reserved. (currently returns error)
+        DW      FEXIT            ;4  - (Not used)
+        DW      FBUS_EXIT        ;5  - (Not used, returns busy flag.)
+        DW      FEXIT            ;6  - (Not used)
+        DW      FEXIT            ;7  - (Not used)
+        DW      FPRN_WRT         ;8  - Character write.
+        DW      FPRN_WRT         ;9  - Character write with verify.
+        DW      FPRN_STA         ;10 - Character write status.
+        DW      FEXIT            ;11 - (Not used.)
+        DW      FEXIT            ;12 - IO Control.
+
+        PAGE
+        SUBTTL  Strategy and Software Interrupt routines.
+
+;Define offsets for io data packet
+
+IODAT   STRUC
+CMDLEN  DB      ?               ;LENGTH OF THIS COMMAND
+UNIT    DB      ?               ;SUB UNIT SPECIFIER
+CMD     DB      ?               ;COMMAND CODE
+STATUS  DW      ?               ;STATUS
+        DB      8 DUP (?)
+MEDIA   DB      ?               ;MEDIA DESCRIPTOR
+TRANS   DD      ?               ;TRANSFER ADDRESS
+COUNT   DW      ?               ;COUNT OF BLOCKS OR CHARACTERS
+START   DW      ?               ;FIRST BLOCK TO TRANSFER
+IODAT   ENDS
+
+PTRSAV  DD      0               ;Strategy pointer save.
+
+;
+; Simplistic Strategy routine for non-multi-Tasking system.
+;
+;   Currently just saves I/O packet pointers in PTRSAV for
+;   later processing by the individual interrupt routines.
+;
+
+STRATP  PROC    FAR
+
+STRATEGY:
+        MOV     WORD PTR CS:[PTRSAV],BX
+        MOV     WORD PTR CS:[PTRSAV+2],ES
+	PUBLIC RE_INIT
+RE_INIT LABEL FAR
+        RET
+
+STRATP  ENDP
+
+;
+; Auxilary interrupt routine for processing I/O packets.
+;
+
+AUX_INT:
+        PUSH    BX
+        MOV     BX,OFFSET AUXTBL
+        JMP     SHORT FENTRY
+
+;
+; Printer interrupt routine for processing I/O packets.
+;
+
+PRN_INT:
+        PUSH    BX
+        MOV     BX,OFFSET PRNTBL
+        JMP     SHORT FENTRY
+
+;
+; Clock interrupt routine for processing I/O packets.
+;
+
+TIM_INT:
+        PUSH    SI
+        MOV     SI,OFFSET TIMTBL
+        JMP     SHORT ENTRY
+
+;
+; Disk interrupt routine for processing I/O packets.
+;
+
+DSK_INT:
+        PUSH    SI
+        MOV     SI,OFFSET DSKTBL
+
+;
+; Common program for handling the simplistic I/O packet
+;   processing scheme in MSDOS 2.0
+;
+
+ENTRY:  PUSH    AX              ;Save all nessacary registers.
+        PUSH    CX
+        PUSH    DX
+        PUSH    DI
+        PUSH    BP
+        PUSH    DS
+        PUSH    ES
+        PUSH    BX
+
+        LDS     BX,CS:[PTRSAV]  ;Retrieve pointer to I/O Packet.
+
+        MOV     AL,[BX.UNIT]    ;AL = Unit code.
+        MOV     AH,[BX.MEDIA]   ;AH = Media descriptor.
+        MOV     CX,[BX.COUNT]   ;CX = Contains byte/sector count.
+        MOV     DX,[BX.START]   ;DX = Starting Logical sector.
+
+        XCHG    DI,AX           ;Move Unit & Media into DI temporarily.
+        MOV     AL,[BX.CMD]     ;Retrieve Command type. (1 => 11)
+        XOR     AH,AH           ;Clear upper half of AX for calculation.
+        ADD     SI,AX           ;Compute entry pointer in dispatch table.
+        ADD     SI,AX
+        CMP     AL,11           ;Verify that not more than 11 commands.
+        JA      CMDERR          ;Ah, well, error out.
+        XCHG    AX,DI           ;Move Unit & Media back where they belong.
+        LES     DI,[BX.TRANS]   ;DI contains addess of Transfer address.
+                                ;ES contains segment.
+        PUSH    CS
+        POP     DS              ;Data segment same as Code segment.
+	ASSUME	DS:CODE
+        JMP     [SI]            ;Perform I/O packet command.
+
+        PAGE
+        SUBTTL  Common error and exit points.
+
+BUS_EXIT:                       ;Device busy exit.
+        MOV     AH,00000011B    ;Set busy and done bits.
+        JMP     SHORT EXIT1
+
+CMDERR: MOV     AL,3            ;Set unknown command error #.
+
+;
+;  Common error processing routine.
+;   AL contains actual error code.
+;
+;   Error # 0 = Write Protect violation.
+;           1 = Unkown unit.
+;           2 = Drive not ready.
+;           3 = Unknown command in I/O packet.
+;           4 = CRC error.
+;           5 = Bad drive request structure length.
+;           6 = Seek error.
+;           7 = Unknown media discovered.
+;           8 = Sector not found.
+;           9 = Printer out of paper.
+;          10 = Write fault.
+;          11 = Read fault.
+;          12 = General failure.
+;
+
+ERR_EXIT:
+        MOV     AH,10000001B    ;Set error and done bits.
+        STC                     ;Set carry bit also.
+        JMP     SHORT EXIT1     ;Quick way out.
+
+EXITP   PROC    FAR             ;Normal exit for device drivers.
+
+EXIT:   MOV     AH,00000001B    ;Set done bit for MSDOS.
+EXIT1:  LDS     BX,CS:[PTRSAV]
+        MOV     [BX.STATUS],AX  ;Save operation compete and status.
+
+        POP     BX              ;Restore registers.
+        POP     ES
+        POP     DS
+        POP     BP
+        POP     DI
+        POP     DX
+        POP     CX
+        POP     AX
+        POP     SI
+        RET                             ;RESTORE REGS AND RETURN
+EXITP   ENDP
+
+;
+; Console interrupt routine for processing I/O packets.
+;
+
+CON_INT:
+        PUSH    BX
+        MOV     BX,OFFSET CONTBL
+
+;;; Fast version of ENTRY for character devices.
+;;; Most registers used in ENTRY are for block devices.
+;;; Fast version skips saving/setting such registers.
+
+FENTRY:
+	PUSH	AX
+	PUSH	SI
+	PUSH	DS
+	PUSH	ES
+	MOV	AX,CS
+	MOV	DS,AX
+	LES	SI,[PTRSAV]
+	MOV	AL,ES:[SI.CMD]
+	CMP	AL,12
+	JA	FCMDERR
+	CBW
+	ADD	AX,AX
+	ADD	BX,AX
+	JMP	[BX]
+FEXIT:
+	MOV	AH,1		; Done
+FEXIT1:
+	MOV	ES:[SI.STATUS],AX
+	POP	ES
+	POP	DS
+	POP	SI
+	POP	AX
+	POP	BX
+FEXITR	PROC	FAR
+	RET
+FEXITR	ENDP
+FBUS_EXIT:
+	MOV	AH,3		; Busy + done
+	JMP	FEXIT1
+FCMDERR:
+	MOV	AL,3
+FERR_EXIT:
+	MOV	AH,81H		; Error + done
+	JMP	FEXIT1
+
+        PAGE
+        SUBTTL  Main console I/O section.
+
+	; Table from DOSMES.ASM except *F8
+	; Must be sorted by key code
+KEYCODELIST LABEL BYTE
+        DB      59                      ; Copy one char - F1
+        DB      "S"                     ; F1 Copy one char
+        DB      60                      ; Copy to char - F2
+        DB      "T"                     ; F2 Copy to char
+        DB      61                      ; Copy line - F3
+        DB      "U"                     ; F3 Copy line
+        DB      62                      ; Skip to char - F4
+        DB      "W"                     ; F5 Skip to char
+        DB      63                      ; Reedit line (new template) - F5
+        DB      "J"                     ; ERASE Reedit line (new template)
+        DB      64                      ; Ctrl-Z - F6
+        DB      "Z"                     ; ^Z inserter
+        DB      65                      ; Escape character - F7
+        DB      "R"                     ; GRAY Escape character
+        DB      66                      ; *F8 (ESC on PC DOS)
+        DB      "E"                     ; SHIFT ERASE Kill line (no change in template)
+        DB      75                      ; Backspace - <--
+        DB      "D"                     ; LEFT Backspace
+        DB      77                      ; Copy one char - -->
+        DB      "S"                     ; F1 Copy one char
+        DB      82                      ; Enter insert mode - INS (toggle)
+        DB      "P"                     ; BLUE Enter insert mode
+        DB      83                      ; Skip one char - DEL
+        DB      "V"                     ; F4 Skip one char
+	DB	255			; End
+	DB	"R"			;
+
+;;; Default is that function keys are converted to escape sequences.
+;;; PC DOS compatible mode is that they are NUL and key code sequences.
+;;; ESC F10 switches the mode.
+CON_BUF	DB	0		; Length
+	DB	?		; Buffer
+	DB	27		; ESC or NUL
+
+;
+; Console keyboard handler.
+;
+
+CISTAT:
+	MOV	BX,OFFSET CON_BUF
+	MOV	AL,[BX]
+	TEST	AL,AL
+	JNE	CISTAT_XLAT
+	MOV	AH,1
+	INT	16H
+	JE	CISTAT_RET	; ZF=1
+	MOV	AH,0
+	INT	16H
+	TEST	AL,AL
+	JNE	CISTAT_1BYTE
+	MOV	AL,27		; ESC
+	CMP	AH,68		; F10
+	JNE	CISTAT_NOTTOGGLE
+	CMP	BYTE PTR [BX+1],AL
+	JNE	CISTAT_NOTTOGGLE
+	;; Toggle mode
+	XOR	BYTE PTR [BX+2],AL ; Switch mode
+	TEST	AL,AL		; ZF=0
+CISTAT_1BYTE:
+	;; 1-byte ZF=0
+	MOV	BYTE PTR [BX],1
+	MOV	[BX+1],AL
+CISTAT_RET:
+	RET
+CISTAT_NOTTOGGLE:
+	CMP	BYTE PTR [BX+2],AL
+	JNE	CISTAT_KEYCODEMODE
+	;; Key code conversion: ESC, alphabet
+	MOV	BX,OFFSET KEYCODELIST-2
+CISTAT_LOOP:
+	INC	BX
+	INC	BX
+	CMP	AH,[BX]
+	JB	CISTAT_NOT_MATCH
+	JNE	CISTAT_LOOP
+	MOV	AH,[BX+1]
+	MOV	BX,OFFSET CON_BUF
+CISTAT_KEYCODEMODE:
+	;; PC DOS compatible: NUL, keycode
+	SUB	AL,27-2		; ZF=0
+	MOV	[BX],AX		; Second byte
+CISTAT_XLAT:			; ZF=0
+	XLAT
+	RET
+CISTAT_NOT_MATCH:
+	CMP	AL,AL		; ZF=1
+	RET
+
+;
+; Get a character from the buffer queue.
+;
+
+CINP:   CALL    CISTAT          ;Check for character ready in queue.
+        JZ      CINP            ;Cycle until one ready.
+	DEC	BYTE PTR [BX]
+        RET
+
+;
+; Console read non-destructive.
+;
+
+FCON_RDND:
+        CALL    CISTAT          ;See if character ready.
+        JZ      CON_RDN2        ;No, return busy signal.
+CON_RDN1:
+	MOV	ES:[SI.MEDIA],AL
+        JMP     FEXIT
+CON_RDN2:
+        JMP     FBUS_EXIT
+
+;
+; Console destructive read.
+;
+
+FCON_READ:
+	PUSH	CX
+	PUSH	DI
+	MOV	CX,ES:[SI.COUNT]
+	LES	DI,ES:[SI.TRANS]
+CON_READ:
+        CALL    CINP            ;Get character.
+        STOSB                   ;Save it in users buffer.
+        LOOP    CON_READ        ;Loop until CX is exhausted.
+	MOV	ES,WORD PTR [PTRSAV+2]
+	POP	DI
+	POP	CX
+        JMP     FEXIT
+
+;
+; Console flush routine. (ctrl-c, ctrl-f, or ctrl-s inspired)
+;
+
+FCON_FLSH:
+	MOV	BYTE PTR [CON_BUF],0
+        JMP     FEXIT
+
+;
+; Console output status routine.
+;
+
+FCON_WRST:
+        JMP     FEXIT            ;Yes, normal exit.
+
+;
+; Console output routine.
+;
+
+FCON_WRIT:
+	MOV	BX,ES:[SI.COUNT]
+	LES	SI,ES:[SI.TRANS]
+CON_WRI1:
+        LODS    BYTE PTR ES:[SI]
+IF      ANSI
+        CALL    CONOUT          ;Call ansi driver.
+        ENDIF
+IFE     ANSI
+        CALL    OUTCHR
+        ENDIF
+	DEC	BX
+	JNE	CON_WRI1
+	LES	SI,[PTRSAV]
+        JMP     FEXIT
+
+;
+; Console character output routine.
+;
+
+OUTCHR:
+	PUSH	AX
+	PUSH	BX
+	MOV	BX,7
+	MOV	AH,0EH
+	INT	10H
+	POP	BX
+	POP	AX
+        RET
+IFE ANSI
+INT29H:
+        CALL    OUTCHR
+	IRET
+ENDIF
+
+        PAGE
+
+IF      ANSI
+
+        SUBTTL  ANSI interface section.
+
+;
+;ANSI Info and routines. ANSI driver implemented as a finite state automata
+;This ANSI driver translates the ANSI standard escape sequences into the
+; Zenith Escape sequences used on the Zenith(Heath) Z(H)-19 terminal.
+;This is not a full implementation of ANSI, but rather a minimal implementation
+; which implements all of the necessary ANSI functions.
+;
+
+ESC     EQU     1BH             ;Escape character used in this implementation.
+STATE   DW      ST1             ;Current ANSI character state.
+PRMPNT  DW      PARMS           ;Current parameter pointer.
+PARMS   DB      0,0,0,0,0,0,0   ;Allow for up to eight parameters.
+LASTPRM DB      0               ;With this being the eight one.
+
+CMDTABL DB      'A'             ;Cursor up.  "esc","[",#,"A"
+        DW      CUU
+        DB      'B'             ;Cursor down. "esc","[",#,"B"
+        DW      CUD
+        DB      'C'             ;Cursor forward. "esc","[",#,"C"
+        DW      CUF
+        DB      'D'             ;Cursor back. "esc","[",#,"D"
+        DW      CUB
+        DB      'H'             ;Direct cursor posit. "esc","[",x,y,"H"
+        DW      CUP
+        DB      'J'             ;Erase. "esc","[",code,"J"
+        DW      ED
+        DB      'K'             ;Erase in line. "esc","[",code,"K"
+        DW      EL
+        DB      'f'             ;Direct cursor posit. "esc","[",x,y,"f"
+        DW      CUP
+        DB      'm'             ;Special video mode. "esc","[",code,"m"
+        DW      SGR
+        DB      's'             ;Save cursor posit. "esc","[","s"
+        DW      PSCP
+        DB      'u'             ;Move cursor to saved. "esc","[","u"
+        DW      PRCP
+        DB      00              ;End of table.
+
+;
+; ANSI console output driver.
+;
+
+CONOUT: MOV     DI,OFFSET STATE ;Retrieve current ansi state.
+        JMP     [DI]            ;Jump to it.
+
+;
+; State one (1).
+;   Looks for an Escape character.
+;
+
+ST1:    CMP     AL,ESC          ;See if this the first character is ESC.
+        JNZ     OUTCHR          ;No, treat as regular character output.
+        MOV     WORD PTR [DI],OFFSET ST2        ;Yes, setup state two.
+        RET
+
+;
+; State two (2).
+;   Looks for the "[" character.
+;
+
+ST2:    CMP     AL,'['          ;See if a valide state two.
+        JNZ     OUTCHR          ;No, treat as regular charcter
+        MOV     BX,OFFSET PARMS ;Yes, get parameter pointer.
+        MOV     WORD PTR [PRMPNT],BX    ;Setup in pointer index.
+        MOV     WORD PTR [BX],0 ;Clear first entry.
+        MOV     WORD PTR [DI],OFFSET ST3;Setup for state three.
+        RET
+
+;
+; State three (3).
+;   Entered one or more times for parameter passing.
+;
+
+ST3:    CMP     AL,';'          ;Look for decimal # seperator.
+        JNZ     ST3A            ;No check phase A.
+        INC     WORD PTR [PRMPNT]       ;Yes, incr. pointer to next param.
+        MOV     AX,OFFSET LASTPRM       ;Check for outside parameter list.
+        CMP     [PRMPNT],AX
+        JBE     RETST3          ;Yes, proceed with next parameter.
+        MOV     [PRMPNT],AX     ;No, treat as extentsion to old.
+RETST3: MOV     DI,[PRMPNT]     ;Setup for next parameter.
+        MOV     BYTE PTR [DI],0 ;Pre-Initialize it to zero.
+        RET
+
+;
+; State three A (3A).
+;   Check for a ascii digit.
+;
+
+ST3A:   CMP     AL,'0'          ;Check for ASCII digit.
+        JB      ST3B            ;No, check for seconday command character.
+        CMP     AL,'9'          ;Still checking for ASCII digit.
+        JA      ST3B            ;No, it must be a secondary.
+        SUB     AL,'0'          ;Convert to binary.
+        MOV     DI,[PRMPNT]     ;Get the current parameter pointer.
+        XCHG    [DI],AL         ;Get existing #.
+        MOV     AH,10           ;Scale by 10.
+        MUL     AH
+        ADD     [DI],AL         ;Add to new digit.
+        RET
+
+;
+; State three B (3B).
+;   Wasn't a ascii digit, so check for secondary command.
+;
+
+ST3B:   MOV     [DI],OFFSET ST1         ;Preset STATE to state 1 just in case.
+        MOV     DI,OFFSET PARMS-1       ;Get pointer to start of parameters.
+        MOV     [PRMPNT],DI             ;Save it in Parameter pointer.
+        MOV     DI,OFFSET CMDTABL-3     ;Get start of Secondary command table.
+
+ST3B1:  ADD     DI,3            ;Update Command table pointer.
+        CMP     BYTE PTR [DI],0 ;Check for end of table.
+        JNZ     ST3B2           ;No, continue processing.
+        JMP     OUTCHR          ;Yes, treat as regular character.
+ST3B2:  CMP     AL,[DI]         ;Check for valid. command.
+        JNZ     ST3B1           ;No, keep checking.
+        JMP     [DI+1]          ;Yes, transfer to that secondary command.
+
+;
+; Get binary parameter from storage and return a one if = 0
+;
+
+GETONE: CALL    GETPARM         ;Get parameter form list.
+        OR      AL,AL           ;Verify for non-zero.
+        JNZ     GETRET          ;Good, then return to caller.
+        INC     AL              ;Bad, make it at least a one.
+GETRET: CBW                     ;Sign extend AL.
+        MOV     CX,AX           ;Copy of it to CX.
+        RET
+
+GETPARM:INC     WORD PTR [PRMPNT]       ;Increment parameter pointer.
+GOTPARM:MOV     DI,[PRMPNT]     ;Get parameter pointer.
+        MOV     AL,[DI]         ;Get parameter value.
+        RET
+
+;
+; Send escape, character sequence.
+;
+
+OUTESC: MOV     AL,ESC          ;Send escape character.
+        CALL    OUTCHR
+        MOV     AL,BL           ;Send follow character.
+        JMP     OUTCHR
+
+;
+; Cursor Positioning routines.
+;
+
+CUU:    MOV     BL,'A'          ;Cursor up.
+        JMP     SHORT CURPOS
+CUD:    MOV     BL,'B'          ;Cursor down.
+        JMP     SHORT CURPOS
+CUF:    MOV     BL,'C'          ;Cursor forward.
+        JMP     SHORT CURPOS
+CUB:    MOV     BL,'D'          ;Cursor back.
+
+CURPOS: CALL    GETONE          ;Get number of positions to move into CX.
+MOVCUR: CALL    OUTESC          ;Send escape, command characters.
+        LOOP    MOVCUR          ;Keep moving until done.
+        RET
+
+;
+; Direct cursor positioning routine.
+;
+
+CUP:    CALL    GETONE          ;Get X position.
+        MOV     DX,AX           ;Save in DX.
+        CALL    GETONE          ;Get Y position.
+        MOV     BL,'Y'
+        CALL    OUTESC          ;Send escape, "Y" sequence.
+        MOV     AL,DL
+        ADD     AL,' '-1        ;Convert binary to Character.
+        CALL    OUTCHR          ;Send X posit.
+        MOV     AL,CL
+        ADD     AL,' '-1        ;Convert binary to Character.
+        JMP     OUTCHR          ;Send Y posit.
+
+;
+; Erase all/part of screen.
+;
+
+ED:     CALL    GETPARM         ;Get trinary command type.
+        MOV     BL,'b'
+        DEC     AL              ;See if erase from begining of screen.
+        JZ      ED1             ;Yes, perform ZDS function.
+        MOV     BL,'E'
+        DEC     AL              ;See if erase from end of screen.
+        JZ      ED1             ;Yes, perform ZDS function.
+        MOV     BL,'J'          ;Now we assume erase whole screen.
+ED1:    JMP     OUTESC
+
+;
+; Erase all/part of a line.
+;
+
+EL:     CALL    GETPARM         ;Get trinary command type.
+        MOV     BL,'o'
+        DEC     AL              ;See if erase from begining of line.
+        JZ      EL1             ;Yes, perform ZDS function.
+        MOV     BL,'l'
+        DEC     AL              ;See if erase whole line.
+        JZ      EL1             ;Yes, perform ZDS function.
+        MOV     BL,'K'          ;Now we assume erase to end of line.
+EL1:    JMP     OUTESC
+
+;
+; Special video modes.
+;
+
+SGR:    CALL    GETPARM         ;Get trinary command type.
+        MOV     BL,'p'
+        CMP     AL,7            ;See if enter reverse video mode.
+        JZ      SGR2            ;Yes, perform ZDS function.
+        MOV     BL,'q'
+        OR      AL,AL           ;See if exit reverse video mode.
+        JNZ     SGR3            ;No, ignore.
+SGR2:   CALL    OUTESC
+SGR3:   RET
+
+;
+; Save / restore cursor position.
+;
+
+PSCP:   MOV     BL,'j'          ;Set save cursor posit. mode.
+        JMP     OUTESC
+
+PRCP:   MOV     BL,'k'          ;Restore last cursor save.
+        JMP     OUTESC
+
+        ENDIF
+
+
+        PAGE
+        SUBTTL  Printer buffer handler.
+
+;
+; Printer status routine.
+;
+
+FPRN_STA:
+        JMP     FEXIT
+
+;
+; Printer write routine.
+;
+
+FPRN_WRT:
+	PUSH	CX
+	PUSH	DX
+	MOV	CX,ES:[SI.COUNT]
+	LES	SI,ES:[SI.TRANS]
+PRN_WR1:LODS    BYTE PTR ES:[SI];Get a data byte.
+	MOV	AH,0
+	CWD
+	INT	17H
+        LOOP    PRN_WR1
+	LES	SI,[PTRSAV]
+	POP	DX
+	POP	CX
+	JMP	FEXIT
+
+        PAGE
+        SUBTTL  Auxilary I/O routines.
+
+AUX_BUF	DW	0
+
+;
+; Status routine for Auxilary port.
+;
+
+AISTAT: MOV     AX,[AUX_BUF]
+        TEST    AH,AH
+        JNZ     AISTA9          ;Character already waiting.
+	PUSH	DX
+	MOV	AX,300H
+	CWD
+	INT	14H
+	TEST	AH,1
+        JZ      AISTA8          ;Still none waiting.
+	MOV	AX,200H
+	CWD
+	INT	14H
+	XOR	AH,80H
+	JS	AISTA1
+	XOR	AX,AX
+AISTA1:
+	MOV	[AUX_BUF],AX
+AISTA8:
+	POP	DX
+AISTA9:
+        RET
+
+;
+; Auxilary port read.
+;
+
+AIN:    CALL    AISTAT          ;Get status and/or char.
+        JZ      AIN             ;Cycle until one is ready.
+	MOV	BYTE PTR [AUX_BUF+1],0
+        RET
+
+;
+; Write routine for Auxilary port.
+;
+
+AOUT:
+	MOV	AH,1
+	CWD
+	INT	14H
+        RET
+
+;
+; Non-Destructive Auxilary read routine.
+;
+
+FAUX_RDND:
+        CALL    AISTAT          ;Get status and copy of char. waiting if any.
+        JZ      AUX_RDN2        ;No character waiting, exit.
+        JMP     CON_RDN1
+AUX_RDN2:
+        JMP     FBUS_EXIT
+
+;
+; Destructive Auxilary read routine.
+;
+
+FAUX_READ:
+	PUSH	CX
+	PUSH	DI
+	MOV	CX,ES:[SI.COUNT]
+	LES	DI,ES:[SI.TRANS]
+AUX_READ:
+        CALL    AIN             ;Get data character.
+        STOSB                   ;Save it through DI.
+        LOOP    AUX_READ        ;Cycle until user buffer full.
+	MOV	ES,WORD PTR [PTRSAV+2]
+	POP	DI
+	POP	CX
+        JMP     FEXIT
+
+;
+; Auxilary clear type a head.
+;
+
+FAUX_CLR:
+	MOV	BYTE PTR [AUX_BUF+1],0
+        JMP     FEXIT
+
+;
+; Auxilary write port status.
+;
+
+FAUX_WRST:
+        JMP     FEXIT
+
+;
+; Auxilary write.
+;
+
+FAUX_WRIT:
+	PUSH	DX
+	MOV	BX,ES:[SI.COUNT]
+	LES	SI,ES:[SI.TRANS]
+AUX_WRI1:
+        LODS    BYTE PTR ES:[SI]        ;Get char. from users buffer.
+        CALL    AOUT            ;Send it to device.
+	DEC	BX
+	JNE	AUX_WRI1
+	LES	SI,[PTRSAV]
+	POP	DX
+        JMP     FEXIT
+
+        PAGE
+        SUBTTL  Date/Time Routines.
+
+TIM_DAYS: DB    2 DUP (?)       ;Number of days since 1-1-80.
+TIM_MINS  DB    ?               ;Minutes.
+TIM_HRS   DB    ?               ;Hours.
+TIM_HSEC  DB    ?               ;Hundreths of a second.
+TIM_SECS  DB    ?               ;Seconds.
+
+;;; 1573040 = 2809 * 560
+TIM_V1A	EQU	2809
+TIM_V1B	EQU	560
+;;; 8640000 = 33750 * 256
+TIM_V2A	EQU	33750
+;;; 8640000 * 1573040 < 2**48
+TIM_TMP	DW	?,?,?
+
+;;; uint48_t TIM_TMP *= BX
+TIM_MUL	PROC	NEAR
+	XOR	CX,CX
+	MOV	SI,OFFSET TIM_TMP
+TIM_MUL_LOOP:
+	LODSW
+	XOR	DX,DX
+	MUL	BX
+	ADD	AX,CX
+	ADC	DX,0
+	MOV	[SI-2],AX
+	MOV	CX,DX
+	CMP	SI,OFFSET TIM_TMP+6
+	JNE	TIM_MUL_LOOP
+	RET
+TIM_MUL	ENDP
+
+;;; uint48_t TIM_TMP /= BX
+;;; DX = TIM_TMP % BX
+TIM_DIV	PROC	NEAR
+	XOR	DX,DX
+	MOV	SI,OFFSET TIM_TMP+4
+	STD
+TIM_DIV_LOOP:
+	LODSW
+	DIV	BX
+	MOV	[SI+2],AX
+	CMP	SI,OFFSET TIM_TMP-2
+	JNE	TIM_DIV_LOOP
+	CLD
+	RET
+TIM_DIV	ENDP
+
+;
+; Time write routine.
+;
+
+TIM_WRT:
+	CMP	CX,6
+	JAE	TIM_WRT1
+	MOV	AL,10
+	JMP	ERR_EXIT
+TIM_WRT1:
+        MOV     SI,OFFSET TIM_DAYS
+        XCHG    SI,DI
+        PUSH    ES
+        MOV     AX,DS
+        POP     DS
+        MOV     ES,AX
+	MOVSW
+	MOVSW
+	MOVSW
+	PUSH	CS
+	POP	DS
+	XOR	DI,DI		; DI=0
+	MOV	CX,60
+	MOV	AL,[TIM_HRS]
+	MUL	CL		; AX=HRS*60
+	XCHG	AX,BX		; BX=HRS*60
+	MOV	AL,[TIM_MINS]
+	CBW			; AX=MINS
+	ADD	AX,BX		; AX=HRS*60+MINS
+	MUL	CX		; DX:AX=(HRS*60+MINS)*60
+	XCHG	AX,BX		; DX:BX=(HRS*60+MINS)*60
+	MOV	AL,[TIM_SECS]
+	CBW			; AX=SECS DX:BX=(HRS*60+MINS)*60
+	ADD	BX,AX
+	ADC	DX,DI		; DX:BX=(HRS*60+MINS)*60+SECS
+	XCHG	AX,DX		; AX:BX=(HRS*60+MINS)*60+SECS
+				; AX:BX < 86400, so AX:BX*100 < UINT32_MAX
+	MOV	CL,100		; CX=100
+	MUL	CX
+	XCHG	AX,BX
+	MUL	CX
+	ADD	DX,BX		; DX:AX=((HRS*60+MINS)*60+SECS)*100
+	XCHG	AX,BX		; DX:BX=((HRS*60+MINS)*60+SECS)*100
+	MOV	AL,[TIM_HSEC]
+	CBW
+	ADD	AX,BX
+	ADC	DX,DI		; DX:AX=((HRS*60+MINS)*60+SECS)*100+HSEC
+	MOV	[TIM_TMP+0],AX
+	MOV	[TIM_TMP+2],DX
+	MOV	[TIM_TMP+4],DI
+	MOV	BX,TIM_V1A
+	CALL	TIM_MUL
+	MOV	BX,TIM_V1B
+	CALL	TIM_MUL
+	MOV	BX,TIM_V2A
+	CALL	TIM_DIV
+	MOV	DX,[TIM_TMP+1]
+	MOV	CX,[TIM_TMP+3]
+	MOV	AH,1
+	INT	1AH
+        JMP     EXIT
+
+;
+; Time read routine.
+;
+
+TIMEREAD PROC NEAR
+	MOV	AH,0
+	INT	1AH
+	TEST	AL,AL
+	JE	TIMEREAD_SAMEDAY
+	INC	WORD PTR [TIM_DAYS]
+TIMEREAD_SAMEDAY:
+	RET
+TIMEREAD ENDP
+
+TIM_RED:
+	CMP	CX,6
+	JAE	TIM_RED1
+	MOV	AL,11
+	JMP	ERR_EXIT
+TIM_RED1:
+	CALL	TIMEREAD
+	MOV	BYTE PTR [TIM_TMP+0],0
+	MOV	[TIM_TMP+1],DX
+	MOV	[TIM_TMP+3],CX
+	MOV	BYTE PTR [TIM_TMP+5],0
+	MOV	BX,TIM_V2A
+	CALL	TIM_MUL
+	MOV	BX,TIM_V1A
+	CALL	TIM_DIV
+	MOV	BX,TIM_V1B
+	CALL	TIM_DIV
+	MOV	BX,100
+	CALL	TIM_DIV
+	MOV	[TIM_HSEC],DL
+	MOV	BX,60
+	CALL	TIM_DIV
+	MOV	[TIM_SECS],DL
+	MOV	AX,[TIM_TMP+0]
+	DIV	BL
+	MOV	[TIM_MINS],AH
+	MOV	[TIM_HRS],AL
+        MOV     SI,OFFSET TIM_DAYS
+	MOVSW
+	MOVSW
+	MOVSW
+        MOV     AL,0
+        JMP     EXIT
+
+        PAGE
+        SUBTTL  Drive Tables.
+
+
+;
+; MSDOS drive initialization tables and other what not.
+;
+;;; Supported format list:
+;;; ID sector-size cyl spt head  (JX Japanese DOS FORMAT.COM switch)
+;;; FF         512  40   8    2  /4 /8
+;;; FE         512  40   8    1  /4 /8 /1
+;;; FD         512  40   9    2  /4                 - PCjr PC DOS default
+;;; FC         512  40   9    1  /4    /1
+;;; FB         512  80   8    2     /8
+;;; FA         512  80   8    1     /8 /1
+;;; F9         512  80   9    2                     - JX Japanese DOS default
+;;; F8         512  80   9    1        /1
+;;; F0         512  80  18    2  ---                - PS/2, the standard
+
+DPB     STRUC
+
+;-------  Start of Drive Parameter Block.
+
+SECSIZE DW      ?               ;Sector size in bytes.                  (dpb)
+ALLOC   DB      ?               ;Number of sectors per alloc. block.    (dpb)
+RESSEC  DW      ?               ;Reserved sectors.                      (dpb)
+FATS    DB      ?               ;Number of FAT's.                       (dpb)
+MAXDIR  DW      ?               ;Number of root directory entries.      (dpb)
+SECTORS DW      ?               ;Number of sectors per diskette.        (dpb)
+MEDIAID DB      ?               ;Media byte ID.                         (dpb)
+FATSEC  DW      ?               ;Number of FAT Sectors.                 (dpb)
+
+;-------  End of Drive Parameter Block.
+
+SECTRK  DW      ?               ;Number of Sectors per track.
+NHEADS	DW	?		;Number of heads
+
+DPB     ENDS
+
+DPBLIST	LABEL	DPB
+	DPB	<512,1,1,2,224,2880,0F0H,9,18,2>
+	DPB	<512,2,1,2,112,640,0FFH,1,8,2>
+	DPB	<512,1,1,2,64,320,0FEH,1,8,1>
+	DPB	<512,2,1,2,112,720,0FDH,2,9,2>
+	DPB	<512,1,1,2,64,360,0FCH,2,9,1>
+	DPB	<512,2,1,2,112,1280,0FBH,2,8,2>
+	DPB	<512,2,1,2,112,640,0FAH,1,8,1>
+	DPB	<512,2,1,2,112,1440,0F9H,3,9,2>
+	DPB	<512,2,1,2,112,720,0F8H,2,9,1>
+
+DPBINDEX DB	1,2,3,4,5,6,7,8,-1,-1,-1,-1,-1,-1,-1,0
+DPBINDEXEND LABEL BYTE
+
+DSK_INIT:
+	MOV     AX,1
+DSKNUNT	EQU	$-2
+	MOV	SI,OFFSET INITTAB
+        JMP     GET_BP5
+
+INITTAB:
+	DW	DPBLIST
+	DW	DPBLIST
+	DW	DPBLIST
+	DW	DPBLIST
+DRVFLG	DB	0
+
+        PAGE
+        SUBTTL  Media check routine
+
+;
+; Media check routine.
+; On entry:
+;       AL = disk unit number.
+;       AH = media byte
+; On exit:
+;
+;       [MEDIA FLAG] = -1 (FF hex) if disk is changed.
+;       [MEDIA FLAG] = 0 if don't know.
+;       [MEDIA FLAG] = 1 if not changed.
+;
+;       [MEDIA] = 0FEH for Standard single density.
+;       [MEDIA] = 0FDH for Altos single density.
+;       [MEDIA] = 0F4H for Altos double density.
+;
+
+MEDIAS  STRUC
+        DB      13 DUP(?)               ;Static request header.
+MEDIAS1 DB      ?                       ;Media byte.
+MEDIAS2 DB      ?                       ;Media status byte flag.
+MEDIAS  ENDS
+
+MEDIAC:
+	MOV	AH,0
+	CMP	AL,BYTE PTR [DSKNUNT]
+	JNB	BADRIV
+	;; If less than 32 ticks from last access, the media is
+	;; treated as not changed.
+	CMP	AL,-1
+LSTADRV EQU $-1
+	JNE	MEDIA1
+	CALL	TIMEREAD
+	SUB	DX,5678H
+LSTATIML EQU $-2
+	SBB	CX,1234H
+LSTATIMH EQU $-2
+	JE	MEDIACCMP
+	JA	MEDIA1
+	ADD	DX,0B0H
+	ADC	CX,18H
+	JNE	MEDIA1
+MEDIACCMP:
+	CMP	DX,32
+	JA	MEDIA1
+	MOV	AH,1
+MEDIA1: LDS     BX,[PTRSAV]     ;Udate media section of data block.
+        MOV     [BX.MEDIAS2],AH
+	MOV	AL,0
+        JMP     EXIT
+
+        PAGE
+        SUBTTL  Build and return Bios Parameter Block for a diskette.
+
+;
+; Build Bios Parameter Blocks.
+;
+;       On entry:  ES:DI contains the address of a scratch sector buffer.
+;                  AL = Unit number.
+;                  AH = Current media byte.
+;
+;       On exit:   Return a DWORD pointer to the associated BPB
+;                  in the Request packet.
+;
+
+BPBS    STRUC
+        DB      13 DUP(?)               ;Static request header.
+BPB1    DB      ?                       ;Media byte.
+BPB2    DW      ?                       ;DWORD transfer address.
+        DW      ?
+BPB3    DW      ?                       ;DWORD pointer to BPB
+        DW      ?
+BPBS    ENDS
+
+DISKBIOS:
+	PUSH	BP
+	MOV	BP,-3		; Retry count
+DISKBIOS_RETRY:
+	PUSH	AX
+	PUSH	CX
+	PUSH	DX
+	MOV	BX,DI
+	INT	13H
+	POP	DX
+	JNC	DISKBIOS_RET
+	INC	BP		; Carry flag is kept
+	JNS	DISKBIOS_RET
+	PUSH	DX
+	MOV	AH,0
+	INT	13H
+	POP	DX
+	POP	CX
+	POP	AX
+	JNC	DISKBIOS_RETRY
+	XOR	BP,BP
+	JMP	DISKBIOS_RETRY
+DISKBIOS_RET:
+	POP	CX
+	POP	BP
+	POP	BP
+	RET
+
+GET_BPB:
+	CMP	AL,BYTE PTR [DSKNUNT]
+	JB	GET_BPB_ALOK
+BADRIV:
+	MOV	AL,1
+	JMP	ERR_EXIT
+GET_BPB_ALOK:
+	PUSH    ES
+        PUSH    DI
+	MOV	CX,1
+	CBW
+	XCHG	AX,DX
+	OR	DL,[DRVFLG]
+	MOV	AX,201H
+	CALL	DISKBIOS
+	POP	DI
+        POP     ES
+	JC	DISKERR
+GET_BP1:MOV     AL,ES:[DI+11+MEDIAID] ;Get diskettes media ID.
+	TEST	AL,AL
+	JNE	GET_BP2
+	;; Old format might not have the DPB.
+	PUSH    ES
+	PUSH	DI
+	INC	CX
+	MOV	AX,201H
+	CALL	DISKBIOS
+	POP	DI
+	POP	ES
+	JC	DISKERR
+	MOV	AL,ES:[DI]	; Media ID in the FAT first byte
+GET_BP2:
+	MOV	AH,1
+	MOV	SI,OFFSET DPBLIST
+	NOT	AL
+	CMP	AL,OFFSET DPBINDEXEND-OFFSET DPBINDEX
+	JAE	GET_BP4
+	MOV	BX,OFFSET DPBINDEX
+	XLAT
+	TEST	AL,AL
+	JS	GET_BP4
+	MOV	AH,SIZE DPB
+	MUL	AH
+	ADD	SI,AX
+	XOR	AX,AX
+GET_BP4:MOV     AL,[SI.MEDIAID]
+
+GET_BP5:LDS     BX,[PTRSAV]     ;Update I/O data packet.
+        MOV     [BX.BPB1],AL    ;Media byte.
+        MOV     [BX.BPB3],SI    ;DPB pointer.
+        MOV     [BX.BPB3+2],CS  ;Code segment.
+	TEST	AH,AH
+	JNZ	GET_BP6
+	MOV	AL,0
+	JMP     EXIT
+GET_BP6:MOV	AX,7
+	JMP	ERR_EXIT
+DISKERR:
+	MOV	BX,OFFSET DISKERR_CODE
+DISKERR_LOOP:
+	SHR	AH,1
+	JE	DISKERR_FOUND
+	INC	BX
+	JMP	DISKERR_LOOP
+DISKERR_FOUND:
+	MOV	AL,[BX]
+	JMP	ERR_EXIT
+DISKERR_CODE LABEL BYTE
+	DB	3,0,8,12,4,12,6,2
+
+        PAGE
+        SUBTTL  MSDOS 2.x Disk I/O drivers.
+
+;
+; Disk READ/WRITE functions.
+;
+; On entry:
+;       AL = Disk I/O driver number
+;       AH = Media byte.
+;       ES = Disk transfer segment.
+;       DI = Disk transfer offset in ES.
+;       CX = Number of sectors to transfer
+;       DX = Logical starting sector.
+;
+; On exit:
+;       Normal exit through common exit routine.
+;
+;       Abnormal exit through common error routine.
+;
+
+DSK_RED:
+	MOV	BL,2
+        JMP     SHORT DSK_COM
+DSK_WRV:
+DSK_WRT:MOV	BL,3
+
+DSK_COM:
+	CMP	AL,BYTE PTR [DSKNUNT]
+	JB	DSK_COM_ALOK
+	JMP	BADRIV
+DSK_COM_ALOK:
+	MOV	SI,AX
+	MOV	AL,AH
+	NOT	AL
+	CMP	AL,OFFSET DPBINDEXEND-OFFSET DPBINDEX
+	JAE	GET_BP6
+	PUSH	BX
+	MOV	BX,OFFSET DPBINDEX
+	XLAT
+	POP	BX
+	TEST	AL,AL
+	JS	GET_BP6
+	MOV	AH,SIZE DPB
+	MUL	AH
+	ADD	AX,OFFSET DPBLIST
+	XCHG	AX,SI
+	PUSH	AX
+	PUSH	DI
+	SHR	DI,1
+	SHR	DI,1
+	SHR	DI,1
+	SHR	DI,1
+	MOV	AX,ES
+	ADD	AX,DI
+	MOV	ES,AX
+	POP	DI
+	AND	DI,0FH
+	POP	AX
+RW_LOOP:
+	PUSH	AX
+	PUSH	BX
+	PUSH	CX
+	PUSH	DX
+	CALL	DISKRW
+	POP	DX
+	POP	CX
+	POP	BX
+	JNC	DISKRWDONE
+	POP	BX
+	JMP	DERROR
+DISKRWDONE:
+	POP	AX
+	TEST	CX,CX
+	JNE	RW_LOOP
+	CALL	TIMEREAD
+	MOV	WORD PTR [LSTATIML],DX
+	MOV	WORD PTR [LSTATIMH],CX
+	MOV	BYTE PTR [LSTADRV],AL
+        MOV     AL,0
+        JMP	EXIT                    ;All done.
+DISKRW:
+	PUSH	BP
+	MOV	BP,SP
+	MOV	AX,[BP+4]
+	XOR	DX,DX
+	MOV	BX,[SI.SECTRK]
+	DIV	BX
+	SUB	BX,DX
+	INC	DL
+	MOV	CL,DL		; Sector
+	XOR	DX,DX
+	DIV	[SI.NHEADS]
+	MOV	DH,DL		; Head
+	MOV	CH,AL		; Cylinder
+	MOV	AL,0
+	SHR	AX,1
+	SHR	AX,1
+	OR	CL,AL
+	MOV	DL,[BP+10]	; Drive
+	CMP	[SI.MEDIAID],0FCH
+	JAE	CYL40
+	;; 80 track access needs bit 6 = 1 for JX
+	OR	DL,[DRVFLG]
+CYL40:
+	MOV	AX,[BP+6]	; Number of sectors
+	CMP	AX,BX
+	JB	DISKRW_NSECOK
+	MOV	AX,BX
+DISKRW_NSECOK:
+	MOV	BX,[SI.SECSIZE]
+DRVDMA	LABEL	BYTE		; 0A9H TEST AX,immediate if no DMA
+	CALL	DISKRW_GETBSEC
+	CMP	AX,BX
+	JB	DISKRW_BOK
+	TEST	BX,BX
+	JE	DISKRW_BHIT
+	MOV	AX,BX
+DISKRW_BOK:
+	PUSH	AX
+	MOV	AH,[BP+8]	; Command
+	CALL	DISKBIOS
+	POP	DX
+	JC	DISKRW_ERR
+DISKRW_BDONE:
+	ADD	[BP+4],DX
+	SUB	[BP+6],DX
+	MOV	AX,[SI.SECSIZE]
+	MOV	CL,4
+	SHR	AX,CL
+	MUL	DX
+	MOV	DX,ES
+	ADD	DX,AX
+	MOV	ES,DX
+	CLC
+DISKRW_ERR:
+	POP	BP
+	RET
+DISKRW_BHIT:
+	LEA	SP,[BP-10]
+	;; Normally this module is loaded into segment 80H, segment
+	;; 60H for 512 byte sector is available for temporary use.
+	PUSH	AX
+	MOV	AX,[SI.SECSIZE]
+	PUSH	AX
+	PUSH	CX
+	;; [BP-10]=CX
+	MOV	[BP-10],CX
+	;; [BP-8]=ES:DI
+	MOV	[BP-8],DI
+	MOV	[BP-6],ES
+	;; [BP-4]=0
+	MOV	WORD PTR [BP-4],0
+	;; [BP-2]=CS-SECSIZE/16
+	MOV	CL,4
+	SHR	AX,CL
+	MOV	BX,CS
+	SUB	BX,AX
+	MOV	[BP-2],BX
+	POP	CX
+	POP	BX
+	POP	AX
+	ASSUME	DS:NOTHING
+	;; If number of sectors is more than 1, read/write the next
+	;; part first to reduce time of waiting for a sector.
+	PUSH	AX
+	PUSH	SI
+	DEC	AX
+	JE	DISKRW_BHIT1
+	INC	CX		; Next sector
+	ADD	DI,BX		; Next offset
+	CALL	DISKRW_BHIT_CALL
+	JNC	DISKRW_BHIT1
+DISKRW_BHIT_DONE:
+	LES	DI,DWORD PTR [BP-8]
+	MOV	CX,[BP-10]
+	PUSH	CS
+	POP	DS
+	POP	SI
+	POP	DX
+	MOV	SP,BP
+	JC	DISKRW_ERR
+	JMP	DISKRW_BDONE
+DISKRW_BHIT1:
+	SHR	BX,1
+	;; Read one sector to temporary memory and copy or
+	;; copy one sector to temporary memory and write.
+	CMP	BYTE PTR [BP+8],2 ; Read
+	JE	DISKRW_BHIT2
+	LDS	SI,DWORD PTR [BP-8]
+	LES	DI,DWORD PTR [BP-4]
+	MOV	CX,BX
+	CLD
+	REP	MOVSW
+DISKRW_BHIT2:
+	LES	DI,DWORD PTR [BP-4]
+	MOV	CX,[BP-10]
+	MOV	AL,1
+	CALL	DISKRW_BHIT_CALL
+	JC	DISKRW_BHIT_DONE
+	CMP	BYTE PTR [BP+8],2 ; Read
+	JNE	DISKRW_BHIT3
+	LDS	SI,DWORD PTR [BP-4]
+	LES	DI,DWORD PTR [BP-8]
+	MOV	CX,BX
+	CLD
+	REP	MOVSW
+DISKRW_BHIT3:
+	CLC
+	JMP	DISKRW_BHIT_DONE
+DISKRW_BHIT_CALL:
+	PUSH	BX
+	MOV	AH,[BP+8]	; Command
+	CALL	DISKBIOS
+	POP	BX
+	RET
+	ASSUME	DS:CODE
+
+DISKRW_GETBSEC PROC NEAR
+	PUSH	AX
+	PUSH	CX
+	MOV	AX,ES
+	MOV	CL,4
+	SHL	AX,CL
+	ADD	AX,DI
+	JE	DMA64K
+	NEG	AX
+	MOV	AL,0
+	XCHG	AL,AH		; Remaining bytes / 256
+	DIV	BH
+	CBW			; Sector size must be < 32768
+	MOV	BX,AX
+DMA64K:
+	POP	CX
+	POP	AX
+	RET
+DISKRW_GETBSEC ENDP
+
+        PAGE
+        SUBTTL  Disk Error processing.
+
+;
+; Disk error routine.
+;
+
+DERROR: LDS     BX,CS:[PTRSAV]
+        MOV     [BX.COUNT],0
+        PUSH    CS
+        POP     DS
+	JMP	DISKERR
+
+        PAGE
+        SUBTTL  Initalization code and temporary work areas.
+
+;
+; Overlayed by MSDOS by SYSINIT.
+;
+DEVSTART LABEL WORD
+	ASSUME	DS:NOTHING
+
+MEMERR	DB	'LOAD ADDRESS ERROR',0
+DSKERR	DB	'READ ERROR',0
+FILEERR	LABEL BYTE
+MSDOS_FILENAME DB 'MSDOS   SYS'
+	DB	' NOT FOUND',0
+NOFDD	DB	'NO FDD',0
+
+;;; DMA boundary test and read
+BTESTREAD PROC NEAR
+	MOV	AX,SEG_JA
+	CMP	AX,CODE
+	JB	BTESTREAD_CONT	; Debugging case: force DMA mode
+	JE	NODMACHK	; JX case
+	INT	12H
+	CMP	AX,64
+	JBE	NODMACHK	; Memory size <= 64KiB
+	PUSH	ES
+	MOV	AX,0FFFH
+	MOV	ES,AX
+	MOV	AX,201H
+	CALL	DISKBIOS
+	POP	ES
+	JC	BTESTREAD_ERROR
+	;; PCjr or DOSBox case
+	DB	0A8H		; TEST AL,immediate (clear CF)
+NODMACHK:
+	STC
+	MOV	[DRVDMA],0A9H	; TEST AX,immediate
+	JC	BTESTREAD_CONT
+	PUSH	DS
+	PUSH	DI
+	MOV	AX,0FFFH
+	MOV	DS,AX
+	MOV	SI,DI
+	MOV	CX,32
+	CLD
+	REP	MOVSW
+	POP	DI
+	POP	DS
+	RET
+BTESTREAD_ERROR:
+	CMP	AH,9
+	JNE	DISKBIOSERR
+BTESTREAD_CONT:
+	MOV	AX,201H
+BTESTREAD ENDP
+	;; Fall through
+DISKBIOSNOERR PROC NEAR
+	CALL	DISKBIOS
+	JC	DISKBIOSERR
+	RET
+DISKBIOSERR:
+	MOV	SI,OFFSET DSKERR
+ERRSTOP:
+	CLD
+	LODS	BYTE PTR CS:[SI]
+	DB	0A8H		; TEST AL,immediate
+ERRSTOP1:
+	HLT			; 0F4H
+	JE	ERRSTOP1
+	MOV	AH,0EH
+	INT	10H
+	JMP	ERRSTOP
+DISKBIOSNOERR ENDP
+
+GETSEGDIFF PROC NEAR
+	MOV	AX,CS
+	SUB	AX,CODE
+	RET
+GETSEGDIFF ENDP
+
+HWINIT:
+	;; For debugging: EXE is runnable from DOS
+	XOR	DX,DX
+HWINIT2:
+	CALL	GETSEGDIFF
+	ADD	AX,STACK
+	MOV	SS,AX
+	MOV	SP,STACKSIZE
+
+	;; Load MSDOS
+	CALL	GETSEGDIFF
+	ADD	AX,LAST
+	MOV	BP,AX
+	MOV	ES,AX
+	XOR	DI,DI
+	MOV	CX,1
+	MOV	DH,0
+	CALL	BTESTREAD
+	MOV	DI,ES:[DI+11]	; BPB Sector size
+	MOV	SS,BP
+	MOV	SP,DI
+	XOR	BP,BP
+	MOV	SI,OFFSET MSDOS_FILENAME
+	PUSH	DX
+	TEST	DL,40H
+	JE	DLOK
+	CMP	BYTE PTR [BP+11+10],0FCH ; Media ID
+	JB	DLOK
+	;; Booting 40 track disk on JX
+	XOR	DL,40H
+DLOK:
+	JMP	RDR_START
+FILENOTFOUND:
+	MOV	SI,OFFSET FILEERR
+	JMP	ERRSTOP
+	INCLUDE	FIL_RDR.ASM
+	POP	DX
+	;; Stack at the end of the DOS will be used until the SYSINIT
+	;; moves the DOS to the FINAL_DOS_LOCATION.
+	PUSH	ES
+	POP	SS
+	LEA	SP,[DI+STACKSIZE]
+
+	CLD
+	MOV	AX,CODE
+	MOV	ES,AX
+	ASSUME	ES:CODE
+	MOV	BX,CS
+	CMP	BX,AX
+	JE	SEGOK
+	JA	SEGMOVE
+	MOV	SI,OFFSET MEMERR
+	JMP	ERRSTOP
+SEGMOVE:
+	;; Move the driver part to proper segment
+	MOV	DS,BX
+	XOR	SI,SI
+	XOR	DI,DI
+	MOV	CX,OFFSET DEVSTART
+	REP	MOVSB
+SEGOK:
+	;; Save 80 tracks per side flag of JX
+	MOV	AL,40H
+	AND	AL,DL
+	MOV	ES:[DRVFLG],AL
+	;; Get number of drives
+	INT	11H
+	SHR	AL,1
+	JC	YESFDD
+	MOV	SI,OFFSET NOFDD
+	JMP	ERRSTOP
+	;; Compressed device driver list
+DEVS	LABEL	BYTE
+IF ANSI
+        DW      8003H           ;Attributes - console input, output device
+ENDIF
+IFE ANSI
+	DW	8013H		; and SPECIAL
+ENDIF
+        DW      CON_INT         ;Interrupt entry point
+	DB	'CON '
+        DW      8000H
+        DW      AUX_INT
+	DB	'AUX '
+        DW      8000H
+        DW      PRN_INT
+	DB	'PRN '
+        DW      8008H
+        DW      TIM_INT
+	DB	'CLOCK '
+        DW      2000H           ;Is a block device
+        DW      DSK_INT
+	DB	4,' '
+NDEVS	EQU	5
+YESFDD:
+	MOV	CL,5
+	SHR	AL,CL
+	ADD	BYTE PTR ES:[DSKNUNT],AL
+
+	;; Create device driver tables.
+	PUSH	CS
+	POP	DS
+	ASSUME	DS:CODE
+	MOV	SI,OFFSET DEVS
+	MOV	DI,OFFSET DEVSTART
+	MOV	CX,NDEVS
+DEVSLP:
+	CMP	CX,2
+	SBB	BX,BX
+	LEA	AX,[DI+18]	; Next entry offset
+	OR	AX,BX		; -1 for last entry
+	STOSW			; Link offset
+	MOV	AX,ES
+	OR	AX,BX
+	STOSW			; Link segment
+	MOVSW			; Attributes
+	MOV	AX,OFFSET STRATEGY
+	STOSW			; Srategy entry point
+	MOVSW			; Interrupt entry point
+	LEA	BX,[DI+8]	; Next entry offset
+DEVSNL:
+	LODSB
+DEVSFL:
+	STOSB
+	CMP	AL,' '
+	JNE	DEVSNL		; Copy name
+	CMP	DI,BX
+	JB	DEVSFL		; Fill space
+	MOV	DI,BX		; Move back if name is 8-byte long.
+	LOOP	DEVSLP
+
+	ASSUME	DS:NOTHING,ES:NOTHING
+
+IFE ANSI
+	;; CON SPECIAL support
+	XOR	AX,AX
+	MOV	DS,AX
+	MOV	WORD PTR DS:[29H*4+0],OFFSET INT29H
+	MOV	WORD PTR DS:[29H*4+2],CODE
+ENDIF
+
+	;; HWINIT part and SYSINITSEG may be run with a different
+	;; segment.
+	CALL	GETSEGDIFF
+	ADD	AX,SEG SYSINIT
+        MOV     DS,AX
+
+ASSUME  DS:SEG SYSINIT
+
+	INT	12H
+	;; MEMORY_SIZE = AX*400H/10H = AX*40H
+	MOV	CL,6
+	SHL	AX,CL
+        MOV     DS:[MEMORY_SIZE],AX
+
+	AND	DL,3
+	INC	DL		; looks like starting from 1
+	MOV	DS:[DEFAULT_DRIVE],DL
+
+        MOV     DS:[CURRENT_DOS_LOCATION],SS
+
+	LEA	AX,[DI+15]
+	MOV	CL,4
+	SHR	AX,CL
+	ADD	AX,CODE
+        MOV     DS:[FINAL_DOS_LOCATION],AX
+
+        MOV     WORD PTR DS:[DEVICE_LIST+2],CODE
+        MOV     WORD PTR DS:[DEVICE_LIST],OFFSET DEVSTART
+
+	MOV	AX,OFFSET SYSINIT
+	PUSH	DS
+	PUSH	AX
+GOTO	PROC	FAR
+	RET
+GOTO	ENDP
+
+CODE    ENDS
+
+        END	HWINIT
