@@ -7,10 +7,10 @@ Serviços de utilidade pública. Apenas algumas chamadas de sistema são suporta
 O binário é de 32 bits. Você precisa de uma biblioteca C compatível com 32 bits.
 
 -------
-Construir
+Reconstruir
 -------
 
-   fazer doscomm
+   Make doscomm
 
 -------
 Comando
@@ -27,22 +27,15 @@ Por que foi escrito em assembly x86 de 32 bits?
 -----------------------------------------------
 
 Este programa é como um emulador que interpreta as instruções 8086, uma por
-um. Quando escrevi esse intérprete em C, havia muitos
-coisas difíceis sobre a implementação de instruções x86 em C. Para
-por exemplo, existem instruções de rotação e instruções BCD compactadas,
-que pode ser um código mais complexo do que em assembly. Além disso, bandeiras
-registrador também é complexo - algumas instruções alteram sinalizadores, outras não,
-detecção de estouro, etc. Se eu usar a linguagem assembly x86, posso usar
+um. Quando escrevi esse intérprete em C, havia muitos coisas difíceis sobre a implementação de instruções x86 em C. Para
+por exemplo, existem instruções de rotação e instruções BCD compactadas, que pode ser um código mais complexo do que em assembly. Além disso, bandeiras
+registrador também é complexo - algumas instruções alteram sinalizadores, outras não, detecção de estouro, etc. Se eu usar a linguagem assembly x86, posso usar
 tais instruções ou sinalizadores são registrados diretamente.
 
 Se o modo virtual 8086 estiver disponível, os binários do DOS são simplesmente executáveis
-diretamente pelo processador. Ainda está disponível no modo de 32 bits, mas
-sistemas operacionais que usam o modo de 64 bits geralmente não suportam
-Modo 8086, porque alternar entre o modo de 64 bits e o modo de 32 bits é
-muito complexo e poucas pessoas querem usar - hoje em dia as pessoas apenas usam
-máquinas virtuais se precisarem usar aplicativos DOS em 64 bits
-sistemas operacionais.
+diretamente pelo processador. Ainda está disponível no modo de 32 bits, mas sistemas operacionais que usam o modo de 64 bits geralmente não suportam
+Modo 8086, porque alternar entre o modo de 64 bits e o modo de 32 bits é muito complexo e poucas pessoas querem usar - hoje em dia as pessoas apenas usam
+máquinas virtuais se precisarem usar aplicativos DOS em 64 bits sistemas operacionais.
 
-A razão de 32 bits é que as instruções BCD não estão disponíveis em
-Modo longo de 64 bits. Binários de 32 bits ainda são suportados em muitos sistemas de 64 bits.
-sistemas operacionais, então deve funcionar.
+A razão de 32 bits é que as instruções BCD não estão disponíveis em Modo longo de 64 bits. Binários de 32 bits ainda são suportados em muitos sistemas de 64 bits.
+sistemas operacionais, então deve funcionar. 
