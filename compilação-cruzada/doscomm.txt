@@ -1,48 +1,48 @@
-DOS COMMAND EXECUTOR
+EXECUTOR DE COMANDO DOS
 
-This command executes DOS command for 8086 on x86 modern operating
-systems.  This command is designed for MASM, LINK and some simple
-utilities.  Only few system calls are supported.
+Este comando executa o comando DOS para 8086 em operação moderna x86
+sistemas. Este comando foi projetado para MASM, LINK e alguns
+Serviços de utilidade pública. Apenas algumas chamadas de sistema são suportadas.
 
-The binary is 32-bit.  You need a 32-bit compatible C library.
-
--------
-Build
--------
-
-  make doscomm
+O binário é de 32 bits. Você precisa de uma biblioteca C compatível com 32 bits.
 
 -------
-Command
+Construir
 -------
 
-  ./doscomm DOS-command-line
+   fazer doscomm
 
-For example:
+-------
+Comando
+-------
 
-  ./doscomm MASM.EXE "SOURCE;"
+   ./doscomm linha de comando DOS
+
+Por exemplo:
+
+   ./doscomm MASM.EXE "FONTE;"
 
 -----------------------------------------------
-Why was it written in 32-bit x86 assembly?
+Por que foi escrito em assembly x86 de 32 bits?
 -----------------------------------------------
 
-This program is like an emulator interpreting 8086 instruction one by
-one.  When I wrote such interpreter in C, there were a lot of
-difficult things about implementing x86 instruction in C.  For
-example, there are rotate instructions and packed BCD instructions,
-which can be more complex code than in assembly.  In addition, flags
-register is also complex - some instruction changes flags, some not,
-overflow detection, etc.  If I use x86 assembly language, I can use
-such instructions or flags register directly.
+Este programa é como um emulador que interpreta as instruções 8086, uma por
+um. Quando escrevi esse intérprete em C, havia muitos
+coisas difíceis sobre a implementação de instruções x86 em C. Para
+por exemplo, existem instruções de rotação e instruções BCD compactadas,
+que pode ser um código mais complexo do que em assembly. Além disso, bandeiras
+registrador também é complexo - algumas instruções alteram sinalizadores, outras não,
+detecção de estouro, etc. Se eu usar a linguagem assembly x86, posso usar
+tais instruções ou sinalizadores são registrados diretamente.
 
-If virtual 8086 mode is available, DOS binaries are simply executable
-directly by the processor.  It is still available in 32-bit mode, but
-operating systems using 64-bit mode generally do not support virtual
-8086 mode, because switching between 64-bit mode and 32-bit mode is
-too complex and only few people want to use - nowadays people just use
-virtual machines if they need to use DOS applications on 64-bit
-operating systems.
+Se o modo virtual 8086 estiver disponível, os binários do DOS são simplesmente executáveis
+diretamente pelo processador. Ainda está disponível no modo de 32 bits, mas
+sistemas operacionais que usam o modo de 64 bits geralmente não suportam
+Modo 8086, porque alternar entre o modo de 64 bits e o modo de 32 bits é
+muito complexo e poucas pessoas querem usar - hoje em dia as pessoas apenas usam
+máquinas virtuais se precisarem usar aplicativos DOS em 64 bits
+sistemas operacionais.
 
-The reason of 32-bit is that BCD instructions are not available on
-64-bit long mode.  32-bit binaries are still supported on many 64-bit
-operating systems, so it should work.
+A razão de 32 bits é que as instruções BCD não estão disponíveis em
+Modo longo de 64 bits. Binários de 32 bits ainda são suportados em muitos sistemas de 64 bits.
+sistemas operacionais, então deve funcionar.
