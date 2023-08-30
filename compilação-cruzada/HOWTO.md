@@ -1,11 +1,11 @@
-# Cross Build How To
+# Construção cruzada, como fazer
 
-Describing how to do cross build MS-DOS, without using virtual machines or existing DOS environment.
+Descrevendo como fazer cross build MS-DOS, sem usar máquinas virtuais ou ambiente DOS existente.
 
-## Build on GNU/Linux (x86 including 64-bit)
+## Reconstruindo em GNU/Linux (x86 incluindo 64 bits)
 
-Use doscomm and the crossmakefile to build on x86 GNU/Linux.
-Make sure 32-bit libc and compilation tools are installed before running the following commands.
+Use doscomm e crossmakefile para construir em x86 GNU/Linux.
+Certifique-se de que a libc de 32 bits e as ferramentas de compilação estejam instaladas antes de executar os comandos a seguir.
 
 ```
 HIDOS/cross$ make
@@ -13,38 +13,37 @@ cc -no-pie -m32 -o doscomm doscomm.s
 HIDOS/cross$ cd ../BUILD/
 HIDOS/BUILD$ make -f ../cross/crossmakefile all
 ```
+Use a opção -j para o comando make para fazer o make paralelo.
 
-Use -j option for make command to do parallel make.
+O arquivo NUL.MAP é criado, mas nunca usado.
 
-NUL.MAP file is created but never used.
+## Reconstruindo em GNU/Linux (não x86)
 
-## Build on GNU/Linux (not x86)
+Não testado.
 
-Not tested.
+Como o programa doscomm é escrito em linguagem assembly x86, use um compilador cruzado para tornar o doscomm binário.
+Em seguida, use o comando qemu-i386 (emulador de usuário QEMU) para executar o binário doscomm.
+A modificação do makefile pode ser necessária.
 
-Since the doscomm program is written in x86 assembly language, use a cross compiler to make the doscomm binary.
-Then use qemu-i386 command (QEMU user emulator) to run the doscomm binary.
-Makefile modification may be needed.
+## Reconstruindo no Windows (32-bit x86)
 
-## Build on Windows (32-bit x86)
+Testado no Windows 2000 (x86).
 
-Tested on Windows 2000 (x86).
+Apenas para Windows 10.
+A versão do Windows 11 de 32 bits não foi lançada.
 
-For Windows 10 only.
-Windows 11 32-bit version is not released.
+Como o Windows de 32 bits pode executar aplicativos MS-DOS, ele pode executar o arquivo em lote de construção diretamente.
+No entanto, a criação paralela provavelmente não é simples.
 
-Since 32-bit Windows can run MS-DOS applications, it can run the build batch file directly.
-However, parallel make is probably not straightforward.
+O programa doscomm pode funcionar em Windows de 32 bits.
 
-The doscomm program may work on 32-bit Windows.
+## Construir no Windows (x86 de 64 bits)
 
-## Build on Windows (64-bit x86)
+Parcialmente testado.
 
-Partially tested.
+O programa doscomm funciona em Windows de 64 bits.
+No entanto, o crossmakefile precisa de um shell semelhante ao Unix e do comando make.
+O Windows de 64 bits também oferece suporte ao subsistema Windows para Linux (WSL), mas o binário Linux de 32 bits parece não ser compatível com WSL1.
 
-The doscomm program works on 64-bit Windows.
-However the crossmakefile needs a Unix-like shell and make command.
-64-bit Windows also supports Windows Subsystem for Linux (WSL), but 32-bit Linux binary looks like not supported by WSL1.
-
-Using doscomm Windows binary built with MinGW from WSL GNU make looks good.
-Note that normal Windows binary cannot read symbolic links, so copying BUILD/ files to a different directory is needed.
+Usar o binário doscomm do Windows criado com MinGW do WSL GNU make parece bom.
+Observe que o binário normal do Windows não pode ler links simbólicos, portanto, é necessário copiar os arquivos BUILD/ para um diretório diferente.
