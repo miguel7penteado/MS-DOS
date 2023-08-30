@@ -140,7 +140,7 @@ A>ECHO 0 > \DEV\EXIT$
 
 ## Status atual
 
-| File Name         | Build               | Run                        |
+| Nome do Arquivo   | Reconstroi ?        | Roda ?                     |
 | ----------------- | ------------------- | -------------------------- |
 | CHKDSK.COM        | OK                  | OK (on MS-DOS)             |
 | COMMAND.COM       | OK                  | OK (on MS-DOS)             |
