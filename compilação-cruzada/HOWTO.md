@@ -1,6 +1,6 @@
 # Construção cruzada, como fazer
 
-Descrevendo como fazer cross build MS-DOS, sem usar máquinas virtuais ou ambiente DOS existente.
+Descrevendo como fazer a compilação cruzada do MS-DOS, sem usar máquinas virtuais ou ambiente DOS existente.
 
 ## Reconstruindo em GNU/Linux (x86 incluindo 64 bits)
 
